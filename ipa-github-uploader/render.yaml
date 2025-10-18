@@ -1,0 +1,34 @@
+services:
+  - type: web
+    name: telegram-bot-api-server
+    env: docker
+    plan: free
+    autoDeploy: true
+    region: singapore
+    rootDir: telegram-bot-api
+    envVars:
+      - key: TELEGRAM_API_ID
+        sync: false
+      - key: TELEGRAM_API_HASH
+        sync: false
+      - key: TELEGRAM_LOCAL
+        value: "1"
+
+  - type: web
+    name: ipa-upload-bot
+    env: docker
+    plan: free
+    autoDeploy: true
+    region: singapore
+    rootDir: bot-uploader
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: BOT_API_BASE
+        sync: false
+      - key: GITHUB_TOKEN
+        sync: false
+      - key: GITHUB_REPO
+        sync: false
+      - key: RELEASE_TAG
+        value: "ipa-files"
