@@ -9,14 +9,14 @@ from aiogram.enums import ParseMode
 from aiogram.client.telegram import TelegramAPIServer
 from aiogram.client.session.aiohttp import AiohttpSession
 
-# =============== ENV ===============
-BOT_TOKEN    = os.environ["BOT_TOKEN"]           # token mới từ BotFather
-BOT_API_BASE = os.environ["BOT_API_BASE"]        # https://telegram-bot-api-server-xxx.onrender.com
+# ================== ENVIRONMENT VARIABLES ==================
+BOT_TOKEN    = os.environ["BOT_TOKEN"]           # Token mới từ @BotFather
+BOT_API_BASE = os.environ["BOT_API_BASE"]        # VD: https://telegram-bot-api-server-jsy3.onrender.com
 GITHUB_TOKEN = os.environ["GITHUB_TOKEN"]
-GITHUB_REPO  = os.environ["GITHUB_REPO"]         # ví dụ: trinhtruongphong-bot/ipa-storage
+GITHUB_REPO  = os.environ["GITHUB_REPO"]         # VD: trinhtruongphong-bot/ipa-storage
 RELEASE_TAG  = os.getenv("RELEASE_TAG", "ipa-files")
 
-# =============== GitHub helpers ===============
+# ================== GITHUB UPLOAD FUNCTIONS ==================
 def gh_headers(extra=None):
     h = {
         "Authorization": f"token {GITHUB_TOKEN}",
@@ -27,6 +27,7 @@ def gh_headers(extra=None):
     return h
 
 def ensure_release_and_get_id():
+    """Ensure GitHub release exists, else create new one."""
     r = requests.get(
         f"https://api.github.com/repos/{GITHUB_REPO}/releases/tags/{RELEASE_TAG}",
         headers=gh_headers(), timeout=60
@@ -45,6 +46,7 @@ def ensure_release_and_get_id():
     r.raise_for_status()
 
 def upload_to_github(file_path: str, file_name: str) -> str:
+    """Upload IPA file to GitHub Releases."""
     release_id = ensure_release_and_get_id()
     upload_url = f"https://uploads.github.com/repos/{GITHUB_REPO}/releases/{release_id}/assets"
     params = {"name": file_name}
@@ -60,19 +62,20 @@ def upload_to_github(file_path: str, file_name: str) -> str:
         raise RuntimeError(f"Upload failed: {resp.status_code} {resp.text[:300]}")
     return f"https://github.com/{GITHUB_REPO}/releases/download/{RELEASE_TAG}/{file_name}"
 
-# =============== Health HTTP server (để Render detect PORT) ===============
+# ================== HEALTH SERVER FOR RENDER ==================
 async def _health(_):
     return web.Response(text="ok")
 
 def run_health_server():
     app = web.Application()
     app.add_routes([web.get("/", _health), web.get("/health", _health)])
-    port = int(os.environ.get("PORT", "8080"))  # Render set biến PORT
-    print(f"🌐 Health server listening on port {port}")
+    port = int(os.environ.get("PORT", "8080"))
+    print(f"🌐 Starting health server on 0.0.0.0:{port}")
     web.run_app(app, host="0.0.0.0", port=port)
 
-# =============== Bot ===============
+# ================== TELEGRAM BOT ==================
 async def start_bot():
+    """Start Telegram bot using aiogram."""
     custom_api = TelegramAPIServer.from_base(BOT_API_BASE)
     session = AiohttpSession(api=custom_api)
     bot = Bot(token=BOT_TOKEN, session=session)
@@ -82,10 +85,10 @@ async def start_bot():
     async def handle_doc(msg: types.Message):
         doc = msg.document
         if not doc:
-            await msg.reply("📦 Gửi file `.ipa` mình sẽ upload lên GitHub Releases.", parse_mode=ParseMode.MARKDOWN)
+            await msg.reply("📦 Gửi file `.ipa` mình sẽ upload lên GitHub Releases.")
             return
         if not (doc.file_name or "").lower().endswith(".ipa"):
-            await msg.reply("❌ Chỉ hỗ trợ file `.ipa`.", parse_mode=ParseMode.MARKDOWN)
+            await msg.reply("❌ Chỉ hỗ trợ file `.ipa`.")
             return
 
         await msg.reply(f"⬆️ Đang tải `{doc.file_name}` lên GitHub…", parse_mode=ParseMode.MARKDOWN)
@@ -101,8 +104,10 @@ async def start_bot():
     print("🤖 Bot started successfully!")
     await dp.start_polling(bot)
 
+# ================== MAIN ==================
 if __name__ == "__main__":
-    # mở cổng health để Render nhận diện
+    # Run health server for Render port detection
     threading.Thread(target=run_health_server, daemon=True).start()
-    # chạy bot (long-polling)
+
+    # Start Telegram bot (polling)
     asyncio.run(start_bot())
