@@ -1,113 +1,179 @@
+# -*- coding: utf-8 -*-
+"""
+Telegram IPA → GitHub Releases Uploader (Render Web Service)
+- Health server (aiohttp) chạy cùng event loop (KHÔNG dùng thread)
+- Bot aiogram v3 (polling), trỏ tới self-hosted telegram-bot-api
+- Upload asset lên GitHub Releases, tự tạo release theo tag ngày
+"""
+
 import os
 import asyncio
-import threading
-import requests
+import time
+from dataclasses import dataclass
 
-from aiohttp import web
-from aiogram import Bot, Dispatcher, types
-from aiogram.enums import ParseMode
+from aiohttp import web, ClientSession
+from aiogram import Bot, Dispatcher, F
+from aiogram.types import Message
+from aiogram.filters import Command
 from aiogram.client.telegram import TelegramAPIServer
-from aiogram.client.session.aiohttp import AiohttpSession
 
-# ================== ENVIRONMENT VARIABLES ==================
-BOT_TOKEN    = os.environ["BOT_TOKEN"]           # Token mới từ @BotFather
-BOT_API_BASE = os.environ["BOT_API_BASE"]        # VD: https://telegram-bot-api-server-jsy3.onrender.com
-GITHUB_TOKEN = os.environ["GITHUB_TOKEN"]
-GITHUB_REPO  = os.environ["GITHUB_REPO"]         # VD: trinhtruongphong-bot/ipa-storage
-RELEASE_TAG  = os.getenv("RELEASE_TAG", "ipa-files")
+# ========= ENV =========
+BOT_TOKEN     = os.environ["BOT_TOKEN"]            # token từ @BotFather
+BOT_API_BASE  = os.environ["BOT_API_BASE"]         # ví dụ: https://telegram-bot-api-server-xxx.onrender.com
+GITHUB_TOKEN  = os.environ["GITHUB_TOKEN"]         # PAT (scope repo)
+GITHUB_REPO   = os.environ["GITHUB_REPO"]          # ví dụ: trinhtruongphong-bot/ipa-storage
+PORT          = int(os.environ.get("PORT", "8080"))  # Render cung cấp biến PORT
+RELEASE_PREFIX = os.environ.get("RELEASE_TAG_PREFIX", "uploads")  # prefix tag (mặc định "uploads")
 
-# ================== GITHUB UPLOAD FUNCTIONS ==================
-def gh_headers(extra=None):
-    h = {
-        "Authorization": f"token {GITHUB_TOKEN}",
-        "Accept": "application/vnd.github+json",
-    }
-    if extra:
-        h.update(extra)
-    return h
+# ========= AIROGRAM (custom server) =========
+server = TelegramAPIServer.from_base(BOT_API_BASE)
+bot = Bot(token=BOT_TOKEN, server=server)
+dp = Dispatcher()
 
-def ensure_release_and_get_id():
-    """Ensure GitHub release exists, else create new one."""
-    r = requests.get(
-        f"https://api.github.com/repos/{GITHUB_REPO}/releases/tags/{RELEASE_TAG}",
-        headers=gh_headers(), timeout=60
-    )
-    if r.status_code == 200:
-        return r.json()["id"]
-    if r.status_code == 404:
-        c = requests.post(
-            f"https://api.github.com/repos/{GITHUB_REPO}/releases",
-            headers=gh_headers(),
-            json={"tag_name": RELEASE_TAG, "name": RELEASE_TAG, "draft": False, "prerelease": False},
-            timeout=60,
-        )
-        c.raise_for_status()
-        return c.json()["id"]
-    r.raise_for_status()
-
-def upload_to_github(file_path: str, file_name: str) -> str:
-    """Upload IPA file to GitHub Releases."""
-    release_id = ensure_release_and_get_id()
-    upload_url = f"https://uploads.github.com/repos/{GITHUB_REPO}/releases/{release_id}/assets"
-    params = {"name": file_name}
-    with open(file_path, "rb") as f:
-        resp = requests.post(
-            upload_url,
-            params=params,
-            headers=gh_headers({"Content-Type": "application/octet-stream"}),
-            data=f,
-            timeout=600,
-        )
-    if resp.status_code not in (200, 201):
-        raise RuntimeError(f"Upload failed: {resp.status_code} {resp.text[:300]}")
-    return f"https://github.com/{GITHUB_REPO}/releases/download/{RELEASE_TAG}/{file_name}"
-
-# ================== HEALTH SERVER FOR RENDER ==================
+# ========= HEALTH SERVER (async, no thread) =========
 async def _health(_):
     return web.Response(text="ok")
 
-def run_health_server():
+async def run_health_server_async():
     app = web.Application()
     app.add_routes([web.get("/", _health), web.get("/health", _health)])
-    port = int(os.environ.get("PORT", "8080"))
-    print(f"🌐 Starting health server on 0.0.0.0:{port}")
-    web.run_app(app, host="0.0.0.0", port=port)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, host="0.0.0.0", port=PORT)
+    await site.start()
+    print(f"🌐 Health server listening on 0.0.0.0:{PORT}", flush=True)
+    await asyncio.Event().wait()  # giữ sống
 
-# ================== TELEGRAM BOT ==================
+# ========= GITHUB HELPERS =========
+@dataclass
+class ReleaseInfo:
+    id: int
+    upload_url: str   # ...{?name,label}
+    html_url: str
+
+def _gh_headers() -> dict:
+    return {
+        "Authorization": f"token {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+def _release_tag_today() -> str:
+    # mỗi ngày một tag: uploads-YYYYMMDD
+    return f"{RELEASE_PREFIX}-{time.strftime('%Y%m%d', time.gmtime())}"
+
+async def gh_ensure_release(session: ClientSession, tag: str) -> ReleaseInfo:
+    owner, repo = GITHUB_REPO.split("/", 1)
+    base = f"https://api.github.com/repos/{owner}/{repo}"
+
+    # check release by tag
+    async with session.get(f"{base}/releases/tags/{tag}", headers=_gh_headers()) as r:
+        if r.status == 200:
+            data = await r.json()
+            return ReleaseInfo(id=data["id"], upload_url=data["upload_url"], html_url=data["html_url"])
+
+    # create if not exists
+    payload = {
+        "tag_name": tag,
+        "name": f"{tag}",
+        "body": f"Automated uploads for tag {tag}",
+        "draft": False,
+        "prerelease": False,
+    }
+    async with session.post(f"{base}/releases", json=payload, headers=_gh_headers()) as r:
+        r.raise_for_status()
+        data = await r.json()
+        return ReleaseInfo(id=data["id"], upload_url=data["upload_url"], html_url=data["html_url"])
+
+async def gh_upload_asset_stream(session: ClientSession, release: ReleaseInfo, filename: str, stream) -> str:
+    """
+    Upload stream (async generator or bytes) to GitHub uploads endpoint.
+    Tự xử lý trùng tên (422) bằng cách đổi tên file kèm timestamp.
+    """
+    upload_base = release.upload_url.split("{", 1)[0]
+    params = {"name": filename}
+    headers = _gh_headers()
+    headers["Content-Type"] = "application/octet-stream"
+
+    async with session.post(upload_base, params=params, data=stream, headers=headers) as r:
+        if r.status == 422:
+            # conflict name -> đổi tên
+            params["name"] = f"{int(time.time())}_{filename}"
+            async with session.post(upload_base, params=params, data=stream, headers=headers) as r2:
+                r2.raise_for_status()
+                j2 = await r2.json()
+                return j2["browser_download_url"]
+        r.raise_for_status()
+        j = await r.json()
+        return j["browser_download_url"]
+
+# ========= TELEGRAM FILE DOWNLOAD (stream) =========
+async def telegram_download_stream(file_path: str):
+    """
+    Trả về async generator để stream từ Telegram Bot API (self-hosted).
+    """
+    url = f"{BOT_API_BASE}/file/bot{BOT_TOKEN}/{file_path}"
+    async with ClientSession() as s:
+        async with s.get(url) as r:
+            r.raise_for_status()
+            async for chunk in r.content.iter_chunked(1024 * 1024):  # 1MB/chunk
+                yield chunk
+
+def is_supported(name: str) -> bool:
+    n = (name or "").lower()
+    return n.endswith(".ipa") or n.endswith(".plist") or n.endswith(".zip")
+
+# ========= HANDLERS =========
+@dp.message(Command("start"))
+async def cmd_start(m: Message):
+    await m.answer(
+        "Chào bạn 👋\n"
+        "• Gửi file `.ipa` (hoặc `.plist`/`.zip`), mình sẽ upload lên **GitHub Releases** và trả link tải.\n"
+        "• Kích thước tối đa phụ thuộc GitHub Releases (tối đa ~2GB/asset)."
+    )
+
+@dp.message(F.document)
+async def on_doc(m: Message):
+    doc = m.document
+    filename = doc.file_name or "file.bin"
+    if not is_supported(filename):
+        await m.reply("❌ Chỉ hỗ trợ: `.ipa`, `.plist`, `.zip`.")
+        return
+
+    status = await m.reply("⏳ Đang lấy file từ Telegram...")
+
+    # 1) get file path
+    tg_file = await bot.get_file(doc.file_id)
+    # 2) create stream from Telegram
+    stream = telegram_download_stream(tg_file.file_path)
+
+    # 3) upload to GitHub
+    await status.edit_text("⬆️ Đang upload lên GitHub Releases...")
+    async with ClientSession() as session:
+        tag = _release_tag_today()
+        rel = await gh_ensure_release(session, tag)
+        dl_url = await gh_upload_asset_stream(session, rel, filename, stream)
+
+    await status.edit_text(
+        "✅ Xong!\n"
+        f"• File: `{filename}`\n"
+        f"• Link tải: {dl_url}\n"
+        f"• Release page: {rel.html_url}",
+        parse_mode="Markdown",
+        disable_web_page_preview=True,
+    )
+
+# ========= MAIN =========
 async def start_bot():
-    """Start Telegram bot using aiogram."""
-    custom_api = TelegramAPIServer.from_base(BOT_API_BASE)
-    session = AiohttpSession(api=custom_api)
-    bot = Bot(token=BOT_TOKEN, session=session)
-    dp = Dispatcher()
+    print("🤖 Starting bot polling...", flush=True)
+    await dp.start_polling(bot, allowed_updates=["message"])
 
-    @dp.message()
-    async def handle_doc(msg: types.Message):
-        doc = msg.document
-        if not doc:
-            await msg.reply("📦 Gửi file `.ipa` mình sẽ upload lên GitHub Releases.")
-            return
-        if not (doc.file_name or "").lower().endswith(".ipa"):
-            await msg.reply("❌ Chỉ hỗ trợ file `.ipa`.")
-            return
+async def main():
+    # Chạy health server & bot song song trong cùng event loop
+    await asyncio.gather(
+        run_health_server_async(),
+        start_bot(),
+    )
 
-        await msg.reply(f"⬆️ Đang tải `{doc.file_name}` lên GitHub…", parse_mode=ParseMode.MARKDOWN)
-        tmp_path = f"/tmp/{doc.file_name}"
-        await bot.download(doc, destination=tmp_path)
-
-        try:
-            link = upload_to_github(tmp_path, doc.file_name)
-            await msg.reply(f"✅ Upload thành công!\n🔗 [Tải trực tiếp]({link})", parse_mode=ParseMode.MARKDOWN)
-        except Exception as e:
-            await msg.reply(f"⚠️ Lỗi: `{e}`", parse_mode=ParseMode.MARKDOWN)
-
-    print("🤖 Bot started successfully!")
-    await dp.start_polling(bot)
-
-# ================== MAIN ==================
 if __name__ == "__main__":
-    # Run health server for Render port detection
-    threading.Thread(target=run_health_server, daemon=True).start()
-
-    # Start Telegram bot (polling)
-    asyncio.run(start_bot())
+    asyncio.run(main())
