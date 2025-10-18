@@ -9,14 +9,14 @@ from aiogram.enums import ParseMode
 from aiogram.client.telegram import TelegramAPIServer
 from aiogram.client.session.aiohttp import AiohttpSession
 
-# --- ENV ---
-BOT_TOKEN    = os.environ["BOT_TOKEN"]
-BOT_API_BASE = os.environ["BOT_API_BASE"]
+# =============== ENV ===============
+BOT_TOKEN    = os.environ["BOT_TOKEN"]           # token mới từ BotFather
+BOT_API_BASE = os.environ["BOT_API_BASE"]        # https://telegram-bot-api-server-xxx.onrender.com
 GITHUB_TOKEN = os.environ["GITHUB_TOKEN"]
-GITHUB_REPO  = os.environ["GITHUB_REPO"]
+GITHUB_REPO  = os.environ["GITHUB_REPO"]         # ví dụ: trinhtruongphong-bot/ipa-storage
 RELEASE_TAG  = os.getenv("RELEASE_TAG", "ipa-files")
 
-# ---------- GitHub helpers ----------
+# =============== GitHub helpers ===============
 def gh_headers(extra=None):
     h = {
         "Authorization": f"token {GITHUB_TOKEN}",
@@ -60,17 +60,18 @@ def upload_to_github(file_path: str, file_name: str) -> str:
         raise RuntimeError(f"Upload failed: {resp.status_code} {resp.text[:300]}")
     return f"https://github.com/{GITHUB_REPO}/releases/download/{RELEASE_TAG}/{file_name}"
 
-# ---------- Health HTTP server (để Render detect PORT) ----------
+# =============== Health HTTP server (để Render detect PORT) ===============
 async def _health(_):
     return web.Response(text="ok")
 
 def run_health_server():
     app = web.Application()
     app.add_routes([web.get("/", _health), web.get("/health", _health)])
-    port = int(os.environ.get("PORT", "8080"))  # Render sẽ set PORT
+    port = int(os.environ.get("PORT", "8080"))  # Render set biến PORT
+    print(f"🌐 Health server listening on port {port}")
     web.run_app(app, host="0.0.0.0", port=port)
 
-# ---------- Bot ----------
+# =============== Bot ===============
 async def start_bot():
     custom_api = TelegramAPIServer.from_base(BOT_API_BASE)
     session = AiohttpSession(api=custom_api)
@@ -101,7 +102,7 @@ async def start_bot():
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    # Chạy health server trên thread riêng để giữ cổng mở
+    # mở cổng health để Render nhận diện
     threading.Thread(target=run_health_server, daemon=True).start()
-    # Chạy bot (polling) ở main thread
+    # chạy bot (long-polling)
     asyncio.run(start_bot())
