@@ -1,9 +1,9 @@
 FROM python:3.11-slim
 
 WORKDIR /app
-COPY upload_to_github_bot.py /app
 
-RUN pip install --no-cache-dir python-telegram-bot==21.6 httpx==0.27.2 requests==2.32.3
+COPY . .
 
-EXPOSE 8080
+RUN pip install --no-cache-dir -r requirements.txt
+
 CMD ["python", "upload_to_github_bot.py"]
