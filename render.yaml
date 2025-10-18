@@ -2,7 +2,7 @@ services:
   - type: web
     name: ipa-upload-bot
     env: docker
-    rootDir: bot-uploader
+    rootDir: .
     dockerfilePath: ./bot-uploader/Dockerfile
     plan: free
     autoDeploy: true
@@ -11,9 +11,9 @@ services:
       - key: BOT_API_BASE
         value: https://telegram-bot-api-server-jsy3.onrender.com
       - key: BOT_TOKEN
-        sync: false       # 🔒 nhập thủ công trên Render Dashboard
+        sync: false
       - key: GITHUB_TOKEN
-        sync: false       # 🔒 nhập thủ công trên Render Dashboard
+        sync: false
       - key: GITHUB_REPO
         value: trinhtruongphong-bot/ipa-storage
       - key: RELEASE_TAG_PREFIX
